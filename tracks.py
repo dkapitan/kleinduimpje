@@ -58,12 +58,18 @@ def _(MousePosition, convert_fit_to_gpx, f, folium, gpxpy):
         # C. Automatically fit the map bounds to the track
         m.fit_bounds(m.get_bounds())
         MousePosition().add_to(m)
-    return (m,)
+    return gpx, m
 
 
 @app.cell
 def _(m):
     m
+    return
+
+
+@app.cell
+def _(gpx):
+    gpx
     return
 
 
