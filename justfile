@@ -8,3 +8,12 @@ show-project-size:
   awk '{print $2 "/" tolower($1)}' | \
   xargs du -sh 2> /dev/null | \
   sort -hr
+
+run:
+  uv run shiny run app.py --reload
+
+build-shinylive:
+  uv run shinylive export . site
+
+run-shinylive:
+  python3 -m http.server --directory site --bind localhost 8008

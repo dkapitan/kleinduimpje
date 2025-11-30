@@ -1,40 +1,85 @@
-from pathlib import Path
-import gpxpy
-from shiny import App, ui, module, reactive, render
+from shiny import App, ui, reactive, module, render
 from shinywidgets import output_widget, render_widget
+import shinyswatch
 from ipyleaflet import Map, Polyline, basemaps
+import httpx
+import xml.etree.ElementTree as ET
+from io import StringIO
 
-# --- Helper: Parse GPX with gpxpy (Robust) ---
-def get_gpx_data(file_path):
-    points = []
-    name = Path(file_path).stem 
-    
+# --- Configuration ---
+GITHUB_REPO = "dkapitan/kleinduimpje"  # Change this to your repo
+GITHUB_BRANCH = "main"
+GPX_FOLDER = "data"  # Folder in repo containing GPX files
+
+
+# --- Helper: Fetch GPX files list from GitHub ---
+async def fetch_gpx_list():
+    """Fetch list of GPX files from GitHub repository"""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GPX_FOLDER}?ref={GITHUB_BRANCH}"
+
     try:
-        # Open the file uploaded by Shiny
-        with open(file_path, 'r', encoding='utf-8') as gpx_file:
-            gpx = gpxpy.parse(gpx_file)
-        
-        # 1. Try to get the internal track name
-        if gpx.tracks and gpx.tracks[0].name:
-            name = gpx.tracks[0].name
-        elif gpx.routes and gpx.routes[0].name:
-            name = gpx.routes[0].name
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
 
-        # 2. Extract points (lat, lon) only
-        for track in gpx.tracks:
-            for segment in track.segments:
-                for point in segment.points:
-                    points.append((point.latitude, point.longitude))
-                    
-        # 3. If no tracks, check for routes
+            files = response.json()
+            gpx_files = [
+                {"name": f["name"], "download_url": f["download_url"]}
+                for f in files
+                if f["name"].lower().endswith(".gpx")
+            ]
+            return gpx_files
+    except Exception as e:
+        print(f"Error fetching GPX list: {e}")
+        return []
+
+
+# --- Helper: Parse GPX from URL ---
+async def fetch_and_parse_gpx(download_url):
+    """Fetch and parse GPX file from URL"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(download_url, timeout=10.0)
+            response.raise_for_status()
+
+            content = response.text
+            return parse_gpx_content(content, download_url.split("/")[-1])
+    except Exception as e:
+        print(f"Error fetching GPX from {download_url}: {e}")
+        return None, (52.0, 5.0), []
+
+
+def parse_gpx_content(content, filename):
+    """Parse GPX XML content"""
+    points = []
+    name = filename.replace(".gpx", "")
+
+    try:
+        root = ET.fromstring(content)
+
+        # Define namespace
+        ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
+
+        # Try to get track name
+        trk_name = root.find(".//gpx:trk/gpx:name", ns)
+        if trk_name is not None and trk_name.text:
+            name = trk_name.text
+
+        # Extract track points
+        for trkpt in root.findall(".//gpx:trkpt", ns):
+            lat = float(trkpt.get("lat"))
+            lon = float(trkpt.get("lon"))
+            points.append((lat, lon))
+
+        # If no track points, try route points
         if not points:
-            for route in gpx.routes:
-                for point in route.points:
-                    points.append((point.latitude, point.longitude))
+            for rtept in root.findall(".//gpx:rtept", ns):
+                lat = float(rtept.get("lat"))
+                lon = float(rtept.get("lon"))
+                points.append((lat, lon))
 
     except Exception as e:
-        print(f"Error parsing {file_path}: {e}")
-        return f"Error: {name}", (52.0, 5.0), []
+        print(f"Error parsing GPX content: {e}")
 
     # Calculate center
     if points:
@@ -46,101 +91,109 @@ def get_gpx_data(file_path):
 
     return name, center, points
 
-# --- Shiny Module: Map Card ---
 
+# --- Shiny Module: Map Card ---
 @module.ui
-def gpx_map_ui(id, display_name):
-    """
-    Defines the UI for a single map card.
-    Args:
-        id: The unique namespace ID (required by @module.ui).
-        display_name: The text to show in the card header.
-    """
-    return ui.card(
-        ui.card_header(display_name),
-        output_widget("map_widget"),
-        style="margin-bottom: 20px; height: 400px;"
+def gpx_map_ui():
+    return ui.div(
+        ui.card(
+            ui.card_header(ui.output_text("card_title")),
+            output_widget("map_widget"),
+            height="400px",
+        ),
+        style="min-width: 350px; flex: 1;",
     )
 
+
 @module.server
-def gpx_map_server(input, output, session, file_path):
+def gpx_map_server(input, output, session, download_url, file_name):
+    gpx_data = reactive.Value(None)
+
+    @reactive.effect
+    async def _():
+        data = await fetch_and_parse_gpx(download_url)
+        gpx_data.set(data)
+
     @render_widget
     def map_widget():
-        name, center, points = get_gpx_data(file_path)
-        
+        data = gpx_data.get()
+
+        if data is None:
+            # Return empty map while loading
+            return Map(
+                basemap=basemaps.OpenStreetMap.Mapnik, center=(52.0, 5.0), zoom=7
+            )
+
+        name, center, points = data
+
         m = Map(
             basemap=basemaps.OpenStreetMap.Mapnik,
             center=center,
             zoom=13,
-            scroll_wheel_zoom=True
+            scroll_wheel_zoom=True,
         )
-        
+
         if points:
             line = Polyline(
-                locations=points,
-                color="blue",
-                fill=False,
-                weight=3
+                locations=points, color="#2563eb", fill=False, weight=4, opacity=0.8
             )
             m.add_layer(line)
-            
+
         return m
 
-# --- Main Application ---
+    @render.text
+    def card_title():
+        data = gpx_data.get()
+        if data is None:
+            return f"Loading {file_name}..."
+        return data[0]
 
-app_ui = ui.page_fluid(
-    ui.h2("Klein Duimpje: Route Visualizer"),
-    ui.p("Select multiple .gpx files to visualize them vertically."),
-    
-    ui.input_file(
-        "gpx_upload", 
-        "Choose GPX Files", 
-        multiple=True, 
-        accept=[".gpx"]
+
+# --- Main Application ---
+app_ui = ui.page_fillable(
+    ui.panel_title("Klein Duimpje: Route Visualizer"),
+    ui.div(
+        ui.output_ui("loading_message"), ui.output_ui("maps_container"), class_="p-3"
     ),
-    
-    ui.hr(),
-    ui.output_ui("gpx_cards"),
-    class_="p-3"
+    theme=shinyswatch.theme.flatly,
 )
 
-def server(input, output, session):
-    
-    # Store the processed files info: list of (name, path, unique_id)
-    processed_files = reactive.Value([])
 
-    @reactive.Effect
-    @reactive.event(input.gpx_upload)
-    def _():
-        files = input.gpx_upload()
-        if not files:
-            return
-            
-        current_list = []
-        for f in files:
-            f_name = f['name']
-            f_path = f['datapath']
-            # Create a simple safe ID from the filename
-            safe_id = "".join(x for x in f_name if x.isalnum())
-            
-            # Store tuple: (Display Name, File Path, ID)
-            current_list.append((f_name, f_path, safe_id))
-            
-            # Spin up the module server using the ID
-            gpx_map_server(safe_id, f_path)
-            
-        processed_files.set(current_list)
+def server(input, output, session):
+    gpx_files = reactive.Value([])
+
+    @reactive.effect
+    async def _():
+        files = await fetch_gpx_list()
+        gpx_files.set(files)
 
     @render.ui
-    def gpx_cards():
-        files = processed_files.get()
+    def loading_message():
+        files = gpx_files.get()
         if not files:
-            return ui.div(ui.p("No files loaded.", class_="text-muted"))
-        
-        # --- CRITICAL FIX IS HERE ---
-        # We pass TWO arguments to gpx_map_ui:
-        # 1. f[2] -> The ID
-        # 2. f[0] -> The Display Name
-        return ui.div(*[gpx_map_ui(f[2], f[0]) for f in files])
+            return ui.div(ui.p("Loading GPX files from GitHub...", class_="text-muted"))
+        return ui.p(f"Visualizing {len(files)} GPX routes", class_="lead")
+
+    @render.ui
+    def maps_container():
+        files = gpx_files.get()
+
+        if not files:
+            return ui.div()
+
+        # Create horizontally stacked cards
+        return ui.div(
+            *[gpx_map_ui(f["name"].replace(".gpx", "")) for f in files],
+            style="display: flex; gap: 20px; flex-wrap: wrap; overflow-x: auto;",
+        )
+
+    # Initialize map servers for each file
+    @reactive.effect
+    def _():
+        files = gpx_files.get()
+        for f in files:
+            module_id = f["name"].replace(".gpx", "")
+            gpx_map_server(module_id, f["download_url"], f["name"])
+
 
 app = App(app_ui, server)
