@@ -1,51 +1,84 @@
-from shiny import App, ui, reactive, module, render
-from shinywidgets import output_widget, render_widget
-import shinyswatch
-from ipyleaflet import Map, Polyline, basemaps
-import httpx
-import xml.etree.ElementTree as ET
 from io import StringIO
+from pathlib import Path
+import tomllib
 
-# --- Configuration ---
-GITHUB_REPO = "dkapitan/kleinduimpje"  # Change this to your repo
+import fsspec
+from ipyleaflet import Map, Polyline, basemaps
+from shiny import App, ui, reactive, module, render
+import shinyswatch
+from shinywidgets import output_widget, render_widget
+import xml.etree.ElementTree as ET
+
+
+# --- Configuration from pyproject.toml ---
+def load_config():
+    """Load GitHub repository configuration from pyproject.toml"""
+    pyproject_path = Path("pyproject.toml")
+
+    if pyproject_path.exists():
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+
+            # Extract repository URL from project metadata
+            repo_url = data.get("project", {}).get("urls", {}).get("Repository", "")
+
+            if repo_url:
+                # Parse GitHub repo from URL (e.g., https://github.com/user/repo)
+                parts = repo_url.rstrip("/").split("/")
+                if len(parts) >= 2:
+                    return f"{parts[-2]}/{parts[-1]}"
+
+            # Fallback to tool.kleinduimpje section if exists
+            tool_config = data.get("tool", {}).get("kleinduimpje", {})
+            if "github_repo" in tool_config:
+                return tool_config["github_repo"]
+
+    # Default fallback
+    return "dkapitan/kleinduimpje"
+
+
+GITHUB_REPO = load_config()
 GITHUB_BRANCH = "main"
 GPX_FOLDER = "data"  # Folder in repo containing GPX files
 
 
 # --- Helper: Fetch GPX files list from GitHub ---
-async def fetch_gpx_list():
-    """Fetch list of GPX files from GitHub repository"""
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GPX_FOLDER}?ref={GITHUB_BRANCH}"
-
+def fetch_gpx_list():
+    """Fetch list of GPX files from GitHub repository using fsspec"""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=10.0)
-            response.raise_for_status()
+        # Split repo into org and repo name
+        org, repo = GITHUB_REPO.split("/")
 
-            files = response.json()
-            gpx_files = [
-                {"name": f["name"], "download_url": f["download_url"]}
-                for f in files
-                if f["name"].lower().endswith(".gpx")
-            ]
-            return gpx_files
+        # Initialize GitHub filesystem with org and repo
+        fs = fsspec.filesystem("github", org=org, repo=repo, sha=GITHUB_BRANCH)
+
+        # List files in the directory
+        files = fs.ls(GPX_FOLDER)
+
+        gpx_files = [{"name": Path(f).name, "path": f} for f in files if f.lower().endswith(".gpx")]
+        return gpx_files
     except Exception as e:
         print(f"Error fetching GPX list: {e}")
         return []
 
 
-# --- Helper: Parse GPX from URL ---
-async def fetch_and_parse_gpx(download_url):
-    """Fetch and parse GPX file from URL"""
+# --- Helper: Parse GPX from GitHub ---
+def fetch_and_parse_gpx(github_path):
+    """Fetch and parse GPX file from GitHub using fsspec"""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(download_url, timeout=10.0)
-            response.raise_for_status()
+        # Split repo into org and repo name
+        org, repo = GITHUB_REPO.split("/")
 
-            content = response.text
-            return parse_gpx_content(content, download_url.split("/")[-1])
+        # Initialize GitHub filesystem with org and repo
+        fs = fsspec.filesystem("github", org=org, repo=repo, sha=GITHUB_BRANCH)
+
+        # Read file content
+        with fs.open(github_path, "r") as f:
+            content = f.read()
+
+        return parse_gpx_content(content, Path(github_path).name)
     except Exception as e:
-        print(f"Error fetching GPX from {download_url}: {e}")
+        print(f"Error fetching GPX from {github_path}: {e}")
         return None, (52.0, 5.0), []
 
 
@@ -106,12 +139,12 @@ def gpx_map_ui():
 
 
 @module.server
-def gpx_map_server(input, output, session, download_url, file_name):
+def gpx_map_server(input, output, session, github_path, file_name):
     gpx_data = reactive.Value(None)
 
     @reactive.effect
-    async def _():
-        data = await fetch_and_parse_gpx(download_url)
+    def _():
+        data = fetch_and_parse_gpx(github_path)
         gpx_data.set(data)
 
     @render_widget
@@ -120,23 +153,16 @@ def gpx_map_server(input, output, session, download_url, file_name):
 
         if data is None:
             # Return empty map while loading
-            return Map(
-                basemap=basemaps.OpenStreetMap.Mapnik, center=(52.0, 5.0), zoom=7
-            )
+            return Map(basemap=basemaps.OpenStreetMap.Mapnik, center=(52.0, 5.0), zoom=7)
 
         name, center, points = data
 
         m = Map(
-            basemap=basemaps.OpenStreetMap.Mapnik,
-            center=center,
-            zoom=13,
-            scroll_wheel_zoom=True,
+            basemap=basemaps.OpenStreetMap.Mapnik, center=center, zoom=13, scroll_wheel_zoom=True
         )
 
         if points:
-            line = Polyline(
-                locations=points, color="#2563eb", fill=False, weight=4, opacity=0.8
-            )
+            line = Polyline(locations=points, color="#2563eb", fill=False, weight=4, opacity=0.8)
             m.add_layer(line)
 
         return m
@@ -152,9 +178,7 @@ def gpx_map_server(input, output, session, download_url, file_name):
 # --- Main Application ---
 app_ui = ui.page_fillable(
     ui.panel_title("Klein Duimpje: Route Visualizer"),
-    ui.div(
-        ui.output_ui("loading_message"), ui.output_ui("maps_container"), class_="p-3"
-    ),
+    ui.div(ui.output_ui("loading_message"), ui.output_ui("maps_container"), class_="p-3"),
     theme=shinyswatch.theme.flatly,
 )
 
@@ -163,8 +187,8 @@ def server(input, output, session):
     gpx_files = reactive.Value([])
 
     @reactive.effect
-    async def _():
-        files = await fetch_gpx_list()
+    def _():
+        files = fetch_gpx_list()
         gpx_files.set(files)
 
     @render.ui
@@ -193,7 +217,7 @@ def server(input, output, session):
         files = gpx_files.get()
         for f in files:
             module_id = f["name"].replace(".gpx", "")
-            gpx_map_server(module_id, f["download_url"], f["name"])
+            gpx_map_server(module_id, f["path"], f["name"])
 
 
 app = App(app_ui, server)

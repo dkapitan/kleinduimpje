@@ -12,7 +12,7 @@ This repository serves as a practical example of:
 
 ## 🚀 Live Demo
 
-Visit the live application: `https://yourusername.github.io/kleinduimpje/`
+Visit the live application: `https://kapitan.net/kleinduimpje/`
 
 ## 🏗️ Architecture & Design Decisions
 
@@ -52,9 +52,9 @@ def parse_gpx_content(content, filename):
         points.append((lat, lon))
 ```
 
-### 3. GitHub as Data Source
+### 3. GitHub as Data Source with `fsspec
 
-**Decision**: Fetch GPX files directly from GitHub repository using GitHub API
+**Decision**: Fetch GPX files directly from GitHub repository
 
 **Rationale**:
 - Eliminates need for backend storage or file upload mechanisms
@@ -71,15 +71,16 @@ async def fetch_gpx_list():
         # Process files...
 ```
 
-### 4. Async/Await Pattern
+### 4. `fsspec` for reading files from GitHub
 
 **Decision**: Use async functions for all network operations
 
 **Rationale**:
-- Prevents blocking the UI during file fetching
-- Enables responsive loading indicators
-- Better user experience with multiple GPX files
-- Native support in Shiny for Python
+- Unified filesystem interface - Works consistently across local, GitHub, S3, and other storage backends
+- Cleaner code - No need to construct URLs manually or parse GitHub API responses
+- Better abstraction - The github:// protocol makes intent clearer
+- More Pythonic - Uses familiar file operations (fs.open(), fs.ls())
+- Aligns with data engineering best practices - fsspec is the standard in the modern Python data stack (used by pandas, dask, polars)
 
 ### 5. Modular Card Components
 
@@ -152,20 +153,21 @@ All dependencies are WASM-compatible:
 
 ```bash
 # Install dependencies with uv
-uv pip install shiny shinywidgets ipyleaflet httpx shinyswatch
+uv sync
 
 # Run locally
-shiny run app.py
+just run
 ```
 
 ### Configuration
 
-Update these variables in `app.py`:
+Update these variables in `pyproject.toml`:
 
 ```python
-GITHUB_REPO = "yourusername/yourrepo"
-GITHUB_BRANCH = "main"
-GPX_FOLDER = "data"
+# Optional: Override repository configuration
+# github_repo = "username/repo"
+github_branch = "main"
+gpx_folder = "data"
 ```
 
 ### Testing Shinylive Export
